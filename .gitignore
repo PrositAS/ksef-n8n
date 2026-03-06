@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.js.map
+.DS_Store
+tmp/*
+.claude/
+.idea/
+.vscode/
+*.log
+.env
+*.env.local
