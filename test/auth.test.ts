@@ -5,6 +5,11 @@ jest.mock('../src/lib/crypto', () => ({
   encryptToken: jest.fn(() => 'mock-encrypted-token'),
 }));
 
+// Mock xades module to avoid real XML signing in auth tests
+jest.mock('../src/lib/xades', () => ({
+  signAuthRequest: jest.fn(() => '<SignedXml/>'),
+}));
+
 function createMockContext(staticData: Record<string, unknown> = {}) {
   return {
     helpers: {
@@ -17,10 +22,26 @@ function createMockContext(staticData: Record<string, unknown> = {}) {
 }
 
 const BASE_URL = 'https://api-test.ksef.mf.gov.pl/v2';
-const NIP = '6423189108';
-const TOKEN = 'test-ksef-token';
+const NIP = '1177422689';
+const TOKEN = 'E8F1A2B3C4D5E6F7A8B9C0D1E2F3A4B5C6D7E8F9';
 
-function setupFullAuthMocks(httpRequest: jest.Mock) {
+const TOKEN_CREDENTIALS = {
+  environment: BASE_URL,
+  nip: NIP,
+  authType: 'token',
+  token: TOKEN,
+};
+
+const CERT_CREDENTIALS = {
+  environment: BASE_URL,
+  nip: NIP,
+  authType: 'certificate',
+  privateKey: '-----BEGIN PRIVATE KEY-----\nMIItest\n-----END PRIVATE KEY-----',
+  certificate: '-----BEGIN CERTIFICATE-----\nMIItest\n-----END CERTIFICATE-----',
+  passphrase: '',
+};
+
+function setupFullTokenAuthMocks(httpRequest: jest.Mock) {
   // Step 1: certificates
   httpRequest.mockResolvedValueOnce([
     {
@@ -39,7 +60,7 @@ function setupFullAuthMocks(httpRequest: jest.Mock) {
     clientIp: '127.0.0.1',
   });
 
-  // Step 4: init token auth
+  // Step 3: init token auth
   httpRequest.mockResolvedValueOnce({
     referenceNumber: '20260306-AU-test-ref',
     authenticationToken: {
@@ -48,14 +69,14 @@ function setupFullAuthMocks(httpRequest: jest.Mock) {
     },
   });
 
-  // Step 5: poll status (immediately complete)
+  // Step 4: poll status (immediately complete)
   httpRequest.mockResolvedValueOnce({
     status: { code: 200, description: 'Success' },
     authenticationMethod: 'Token',
     startDate: '2026-03-06T12:00:00Z',
   });
 
-  // Step 6: redeem
+  // Step 5: redeem
   httpRequest.mockResolvedValueOnce({
     accessToken: {
       token: 'real-access-token',
@@ -68,13 +89,51 @@ function setupFullAuthMocks(httpRequest: jest.Mock) {
   });
 }
 
-describe('getAccessToken', () => {
-  it('should execute all 6 auth steps in order', async () => {
+function setupFullCertAuthMocks(httpRequest: jest.Mock) {
+  // Step 1: challenge
+  httpRequest.mockResolvedValueOnce({
+    challenge: '20260306-CR-test-challenge',
+    timestamp: '2026-03-06T12:00:00Z',
+    timestampMs: 1772801990478,
+    clientIp: '127.0.0.1',
+  });
+
+  // Step 2: submit signed XML
+  httpRequest.mockResolvedValueOnce({
+    referenceNumber: '20260306-AU-cert-ref',
+    authenticationToken: {
+      token: 'temp-cert-jwt-token',
+      validUntil: '2026-03-06T13:00:00Z',
+    },
+  });
+
+  // Step 3: poll status (immediately complete)
+  httpRequest.mockResolvedValueOnce({
+    status: { code: 200, description: 'Success' },
+    authenticationMethod: 'Certificate',
+    startDate: '2026-03-06T12:00:00Z',
+  });
+
+  // Step 4: redeem
+  httpRequest.mockResolvedValueOnce({
+    accessToken: {
+      token: 'cert-access-token',
+      validUntil: new Date(Date.now() + 3600_000).toISOString(),
+    },
+    refreshToken: {
+      token: 'cert-refresh-token',
+      validUntil: new Date(Date.now() + 7200_000).toISOString(),
+    },
+  });
+}
+
+describe('getAccessToken — token auth', () => {
+  it('should execute all 5 auth steps in order', async () => {
     const staticData = {};
     const ctx = createMockContext(staticData);
-    setupFullAuthMocks(ctx.helpers.httpRequest);
+    setupFullTokenAuthMocks(ctx.helpers.httpRequest);
 
-    const token = await getAccessToken(ctx as any, BASE_URL, NIP, TOKEN);
+    const token = await getAccessToken(ctx as any, BASE_URL, TOKEN_CREDENTIALS as any);
 
     expect(token).toBe('real-access-token');
     expect(ctx.helpers.httpRequest).toHaveBeenCalledTimes(5);
@@ -90,9 +149,9 @@ describe('getAccessToken', () => {
   it('should cache the session in static data', async () => {
     const staticData: Record<string, unknown> = {};
     const ctx = createMockContext(staticData);
-    setupFullAuthMocks(ctx.helpers.httpRequest);
+    setupFullTokenAuthMocks(ctx.helpers.httpRequest);
 
-    await getAccessToken(ctx as any, BASE_URL, NIP, TOKEN);
+    await getAccessToken(ctx as any, BASE_URL, TOKEN_CREDENTIALS as any);
 
     const session = staticData.ksefSession as any;
     expect(session).toBeDefined();
@@ -114,7 +173,7 @@ describe('getAccessToken', () => {
     };
     const ctx = createMockContext(staticData);
 
-    const token = await getAccessToken(ctx as any, BASE_URL, NIP, TOKEN);
+    const token = await getAccessToken(ctx as any, BASE_URL, TOKEN_CREDENTIALS as any);
 
     expect(token).toBe('cached-access-token');
     expect(ctx.helpers.httpRequest).not.toHaveBeenCalled();
@@ -142,7 +201,7 @@ describe('getAccessToken', () => {
       },
     });
 
-    const token = await getAccessToken(ctx as any, BASE_URL, NIP, TOKEN);
+    const token = await getAccessToken(ctx as any, BASE_URL, TOKEN_CREDENTIALS as any);
 
     expect(token).toBe('refreshed-access-token');
     expect(ctx.helpers.httpRequest).toHaveBeenCalledTimes(1);
@@ -163,9 +222,9 @@ describe('getAccessToken', () => {
       },
     };
     const ctx = createMockContext(staticData);
-    setupFullAuthMocks(ctx.helpers.httpRequest);
+    setupFullTokenAuthMocks(ctx.helpers.httpRequest);
 
-    const token = await getAccessToken(ctx as any, BASE_URL, NIP, TOKEN);
+    const token = await getAccessToken(ctx as any, BASE_URL, TOKEN_CREDENTIALS as any);
 
     // Should do full auth, not use cached production token
     expect(token).toBe('real-access-token');
@@ -176,7 +235,7 @@ describe('getAccessToken', () => {
     const ctx = createMockContext();
     const httpRequest = ctx.helpers.httpRequest;
 
-    // Steps 1-4
+    // Steps 1-3
     httpRequest.mockResolvedValueOnce([
       { certificate: 'cert', usage: ['KsefTokenEncryption'] },
     ]);
@@ -189,13 +248,13 @@ describe('getAccessToken', () => {
       authenticationToken: { token: 'tmp', validUntil: '2026-01-01' },
     });
 
-    // Step 5: error status
+    // Step 4: error status
     httpRequest.mockResolvedValueOnce({
       status: { code: 450, description: 'Token invalid' },
     });
 
     await expect(
-      getAccessToken(ctx as any, BASE_URL, NIP, TOKEN),
+      getAccessToken(ctx as any, BASE_URL, TOKEN_CREDENTIALS as any),
     ).rejects.toThrow(/authentication failed/i);
   });
 
@@ -203,7 +262,7 @@ describe('getAccessToken', () => {
     const ctx = createMockContext();
     const httpRequest = ctx.helpers.httpRequest;
 
-    // Steps 1-4
+    // Steps 1-3
     httpRequest.mockResolvedValueOnce([
       { certificate: 'cert', usage: ['KsefTokenEncryption'] },
     ]);
@@ -216,7 +275,7 @@ describe('getAccessToken', () => {
       authenticationToken: { token: 'tmp', validUntil: '2026-01-01' },
     });
 
-    // Step 5: poll 3 times (100, 100, 200)
+    // Step 4: poll 3 times (100, 100, 200)
     httpRequest.mockResolvedValueOnce({
       status: { code: 100, description: 'In progress' },
     });
@@ -227,7 +286,7 @@ describe('getAccessToken', () => {
       status: { code: 200, description: 'Success' },
     });
 
-    // Step 6: redeem
+    // Step 5: redeem
     httpRequest.mockResolvedValueOnce({
       accessToken: {
         token: 'access',
@@ -239,12 +298,84 @@ describe('getAccessToken', () => {
       },
     });
 
-    const token = await getAccessToken(ctx as any, BASE_URL, NIP, TOKEN);
+    const token = await getAccessToken(ctx as any, BASE_URL, TOKEN_CREDENTIALS as any);
 
     expect(token).toBe('access');
     // 1 certs + 1 challenge + 1 init + 3 polls + 1 redeem = 7
     expect(httpRequest).toHaveBeenCalledTimes(7);
   }, 10_000);
+});
+
+describe('getAccessToken — certificate auth', () => {
+  it('should execute certificate auth flow (challenge → sign → poll → redeem)', async () => {
+    const staticData = {};
+    const ctx = createMockContext(staticData);
+    setupFullCertAuthMocks(ctx.helpers.httpRequest);
+
+    const token = await getAccessToken(ctx as any, BASE_URL, CERT_CREDENTIALS as any);
+
+    expect(token).toBe('cert-access-token');
+    expect(ctx.helpers.httpRequest).toHaveBeenCalledTimes(4);
+
+    const calls = ctx.helpers.httpRequest.mock.calls;
+    expect(calls[0][0].url).toContain('/auth/challenge');
+    expect(calls[1][0].url).toContain('/auth/xades-signature');
+    expect(calls[1][0].headers).toEqual(
+      expect.objectContaining({ 'Content-Type': 'application/xml' }),
+    );
+    expect(calls[2][0].url).toContain('/auth/20260306-AU-cert-ref');
+    expect(calls[3][0].url).toContain('/auth/token/redeem');
+  });
+
+  it('should cache certificate session same as token session', async () => {
+    const staticData: Record<string, unknown> = {};
+    const ctx = createMockContext(staticData);
+    setupFullCertAuthMocks(ctx.helpers.httpRequest);
+
+    await getAccessToken(ctx as any, BASE_URL, CERT_CREDENTIALS as any);
+
+    const session = staticData.ksefSession as any;
+    expect(session).toBeDefined();
+    expect(session.accessToken).toBe('cert-access-token');
+    expect(session.refreshToken).toBe('cert-refresh-token');
+    expect(session.baseUrl).toBe(BASE_URL);
+  });
+
+  it('should use cached token for certificate auth too', async () => {
+    const futureDate = new Date(Date.now() + 300_000).toISOString();
+    const staticData = {
+      ksefSession: {
+        accessToken: 'cached-cert-token',
+        accessTokenExpiry: futureDate,
+        refreshToken: 'cached-refresh',
+        refreshTokenExpiry: futureDate,
+        baseUrl: BASE_URL,
+      },
+    };
+    const ctx = createMockContext(staticData);
+
+    const token = await getAccessToken(ctx as any, BASE_URL, CERT_CREDENTIALS as any);
+
+    expect(token).toBe('cached-cert-token');
+    expect(ctx.helpers.httpRequest).not.toHaveBeenCalled();
+  });
+
+  it('should default to token auth when authType is not specified', async () => {
+    const staticData = {};
+    const ctx = createMockContext(staticData);
+    setupFullTokenAuthMocks(ctx.helpers.httpRequest);
+
+    const credentialsNoAuthType = { ...TOKEN_CREDENTIALS };
+    delete (credentialsNoAuthType as any).authType;
+
+    const token = await getAccessToken(ctx as any, BASE_URL, credentialsNoAuthType as any);
+
+    expect(token).toBe('real-access-token');
+    // Token auth path starts with /security/public-key-certificates
+    expect(ctx.helpers.httpRequest.mock.calls[0][0].url).toContain(
+      '/security/public-key-certificates',
+    );
+  });
 });
 
 describe('closeSession', () => {

@@ -46,8 +46,6 @@ export async function queryInvoices(
 ): Promise<INodeExecutionData[]> {
   const credentials = await context.getCredentials('ksefApi');
   const baseUrl = credentials.environment as string;
-  const nip = credentials.nip as string;
-  const ksefToken = credentials.token as string;
 
   const subjectType = context.getNodeParameter('subjectType', itemIndex) as string;
   const dateFrom = context.getNodeParameter('dateFrom', itemIndex) as string;
@@ -60,7 +58,7 @@ export async function queryInvoices(
 
   let accessToken: string;
   try {
-    accessToken = await getAccessToken(context, baseUrl, nip, ksefToken);
+    accessToken = await getAccessToken(context, baseUrl, credentials as IDataObject);
   } catch (error) {
     handleKsefError(context, error);
   }

@@ -1,8 +1,14 @@
 {
   "name": "n8n-nodes-ksef",
-  "version": "0.1.0",
-  "description": "n8n community node for Poland's KSeF (Krajowy System e-Faktur) API v2",
-  "keywords": ["n8n-community-node-package", "ksef", "e-faktura", "poland", "invoice"],
+  "version": "1.0.0",
+  "description": "n8n community node for Poland's KSeF (Krajowy System e-Faktur) e-invoicing API — query, download, and manage invoices with token or certificate authentication",
+  "keywords": [
+    "n8n-community-node-package",
+    "ksef",
+    "e-faktura",
+    "poland",
+    "invoice"
+  ],
   "license": "MIT",
   "author": {
     "name": "Prosit AS",
@@ -20,15 +26,22 @@
     "lint": "eslint src/ --ext .ts",
     "test": "jest"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "n8n": {
     "n8nNodesApiVersion": 1,
-    "credentials": ["dist/credentials/KsefApi.credentials.js"],
-    "nodes": ["dist/nodes/Ksef/Ksef.node.js"]
+    "credentials": [
+      "dist/credentials/KsefApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/Ksef/Ksef.node.js"
+    ]
   },
   "devDependencies": {
     "@types/jest": "^29.0.0",
     "@types/node": "^20.0.0",
+    "@types/xml2js": "^0.4.14",
     "gulp": "^5.0.0",
     "jest": "^29.0.0",
     "n8n-workflow": "^1.0.0",
@@ -37,5 +50,10 @@
   },
   "peerDependencies": {
     "n8n-workflow": ">=1.0.0"
+  },
+  "dependencies": {
+    "@xmldom/xmldom": "^0.8.11",
+    "xml-crypto": "^6.1.2",
+    "xml2js": "^0.6.2"
   }
 }

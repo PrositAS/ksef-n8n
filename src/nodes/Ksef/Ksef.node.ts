@@ -6,6 +6,8 @@ import {
 } from 'n8n-workflow';
 import { queryInvoices } from './operations/queryInvoices';
 import { downloadInvoice } from './operations/downloadInvoice';
+import { startSession } from './operations/startSession';
+import { checkStatus } from './operations/checkStatus';
 import { closeSession } from '../../lib/auth';
 
 export class Ksef implements INodeType {
@@ -15,7 +17,7 @@ export class Ksef implements INodeType {
     icon: 'file:ksef.svg',
     group: ['transform'],
     version: 1,
-    subtitle: '={{ $parameter["operation"] }}',
+    subtitle: '={{ $parameter["resource"] + ": " + $parameter["operation"] }}',
     description:
       "Interact with Poland's KSeF (Krajowy System e-Faktur) e-invoicing system",
     defaults: {
@@ -36,11 +38,14 @@ export class Ksef implements INodeType {
         name: 'resource',
         type: 'options',
         noDataExpression: true,
-        options: [{ name: 'Invoice', value: 'invoice' }],
+        options: [
+          { name: 'Invoice', value: 'invoice' },
+          { name: 'Session', value: 'session' },
+        ],
         default: 'invoice',
       },
 
-      // Operation
+      // --- Invoice operations ---
       {
         displayName: 'Operation',
         name: 'operation',
@@ -62,6 +67,30 @@ export class Ksef implements INodeType {
           },
         ],
         default: 'queryMetadata',
+      },
+
+      // --- Session operations ---
+      {
+        displayName: 'Operation',
+        name: 'operation',
+        type: 'options',
+        noDataExpression: true,
+        displayOptions: { show: { resource: ['session'] } },
+        options: [
+          {
+            name: 'Start',
+            value: 'start',
+            description: 'Authenticate and start a KSeF session',
+            action: 'Start KSeF session',
+          },
+          {
+            name: 'Check Status',
+            value: 'checkStatus',
+            description: 'List active sessions and their status',
+            action: 'Check active sessions',
+          },
+        ],
+        default: 'start',
       },
 
       // --- Query Metadata parameters ---
@@ -141,8 +170,17 @@ export class Ksef implements INodeType {
         default: '',
         required: true,
         description:
-          'KSeF invoice number (e.g., 6423189108-20260215-1A2B3C-4D5E6F-01)',
+          'KSeF invoice number (e.g., 1177422689-20260215-1A2B3C-4D5E6F-01)',
         placeholder: '={{ $json.ksefNumber }}',
+      },
+      {
+        displayName: 'Parse XML',
+        name: 'parseXml',
+        type: 'boolean',
+        displayOptions: { show: { operation: ['download'] } },
+        default: false,
+        description:
+          'Whether to parse invoice XML into structured JSON (returned alongside raw XML)',
       },
     ],
   };
@@ -162,6 +200,14 @@ export class Ksef implements INodeType {
               returnData.push(...results);
             } else if (operation === 'download') {
               const results = await downloadInvoice(this, i);
+              returnData.push(...results);
+            }
+          } else if (resource === 'session') {
+            if (operation === 'start') {
+              const results = await startSession(this, i);
+              returnData.push(...results);
+            } else if (operation === 'checkStatus') {
+              const results = await checkStatus(this, i);
               returnData.push(...results);
             }
           }

@@ -132,6 +132,28 @@ export interface FlattenedInvoice {
   invoiceHash: string;
 }
 
+// --- Session types ---
+
+export interface SessionListItem {
+  referenceNumber: string;
+  isCurrent: boolean;
+  startDate: string;
+  authenticationMethod: string;
+  authenticationMethodInfo: {
+    category: string;
+    code: string;
+    displayName: string;
+  };
+  status: StatusInfo;
+  isTokenRedeemed: boolean;
+  refreshTokenValidUntil?: string;
+}
+
+export interface SessionListResponse {
+  continuationToken?: string;
+  items: SessionListItem[];
+}
+
 // --- Error types ---
 
 export interface KsefExceptionDetail {

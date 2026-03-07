@@ -1,5 +1,6 @@
-import { IExecuteFunctions, NodeApiError } from 'n8n-workflow';
+import { IExecuteFunctions, IDataObject, NodeApiError } from 'n8n-workflow';
 import { encryptToken } from './crypto';
+import { signAuthRequest } from './xades';
 import { translateAuthStatus } from './errors';
 import type {
   PublicKeyCertificate,
@@ -41,7 +42,6 @@ async function refreshAccessToken(
     json: true,
   })) as AuthTokenRefreshResponse;
 
-  // Refresh only returns new accessToken — refreshToken stays the same
   session.accessToken = response.accessToken.token;
   session.accessTokenExpiry = response.accessToken.validUntil;
   staticData.ksefSession = session;
@@ -49,41 +49,72 @@ async function refreshAccessToken(
   return session.accessToken;
 }
 
-export async function getAccessToken(
+// --- Shared helpers for poll + redeem (used by both token and certificate flows) ---
+
+async function pollAuthStatus(
+  context: IExecuteFunctions,
+  baseUrl: string,
+  referenceNumber: string,
+  tempToken: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt++) {
+    const statusResponse = (await context.helpers.httpRequest({
+      method: 'GET',
+      url: `${baseUrl}/auth/${referenceNumber}`,
+      headers: { Authorization: `Bearer ${tempToken}` },
+      json: true,
+    })) as AuthStatusResponse;
+
+    if (statusResponse.status.code === 200) {
+      return;
+    }
+
+    if (statusResponse.status.code === 100) {
+      await sleep(POLL_INTERVAL_MS);
+      continue;
+    }
+
+    throw new NodeApiError(context.getNode(), {} as never, {
+      message: `KSeF authentication failed (code ${statusResponse.status.code})`,
+      description: translateAuthStatus(statusResponse.status),
+    });
+  }
+}
+
+async function redeemTokens(
+  context: IExecuteFunctions,
+  baseUrl: string,
+  tempToken: string,
+  staticData: Record<string, unknown>,
+): Promise<string> {
+  const tokensResponse = (await context.helpers.httpRequest({
+    method: 'POST',
+    url: `${baseUrl}/auth/token/redeem`,
+    headers: { Authorization: `Bearer ${tempToken}` },
+    json: true,
+  })) as AuthTokensResponse;
+
+  const session: KsefSession = {
+    accessToken: tokensResponse.accessToken.token,
+    accessTokenExpiry: tokensResponse.accessToken.validUntil,
+    refreshToken: tokensResponse.refreshToken.token,
+    refreshTokenExpiry: tokensResponse.refreshToken.validUntil,
+    baseUrl,
+  };
+  staticData.ksefSession = session;
+
+  return session.accessToken;
+}
+
+// --- Token auth flow ---
+
+async function authenticateWithToken(
   context: IExecuteFunctions,
   baseUrl: string,
   nip: string,
   ksefToken: string,
+  staticData: Record<string, unknown>,
 ): Promise<string> {
-  const staticData = context.getWorkflowStaticData('global') as Record<
-    string,
-    unknown
-  >;
-  const cached = getSession(staticData, baseUrl);
-
-  // Return cached token if still valid (with buffer)
-  if (
-    cached &&
-    new Date(cached.accessTokenExpiry).getTime() > Date.now() + TOKEN_EXPIRY_BUFFER_MS
-  ) {
-    return cached.accessToken;
-  }
-
-  // Try refresh if access expired but refresh is still valid
-  if (
-    cached &&
-    new Date(cached.refreshTokenExpiry).getTime() > Date.now() + TOKEN_EXPIRY_BUFFER_MS
-  ) {
-    try {
-      return await refreshAccessToken(context, baseUrl, cached, staticData);
-    } catch {
-      // Refresh failed — fall through to full auth
-      delete staticData.ksefSession;
-    }
-  }
-
-  // --- Full 6-step auth flow ---
-
   // Step 1: Get public key certificates
   const certificates = (await context.helpers.httpRequest({
     method: 'GET',
@@ -122,10 +153,7 @@ export async function getAccessToken(
     url: `${baseUrl}/auth/ksef-token`,
     body: {
       challenge: challenge.challenge,
-      contextIdentifier: {
-        type: 'Nip',
-        value: nip,
-      },
+      contextIdentifier: { type: 'Nip', value: nip },
       encryptedToken: encrypted,
     },
     json: true,
@@ -133,50 +161,118 @@ export async function getAccessToken(
 
   const tempToken = initResponse.authenticationToken.token;
 
-  // Step 5: Poll auth status
-  for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt++) {
-    const statusResponse = (await context.helpers.httpRequest({
-      method: 'GET',
-      url: `${baseUrl}/auth/${initResponse.referenceNumber}`,
-      headers: { Authorization: `Bearer ${tempToken}` },
-      json: true,
-    })) as AuthStatusResponse;
+  // Steps 5-6: Poll + Redeem (shared)
+  await pollAuthStatus(context, baseUrl, initResponse.referenceNumber, tempToken);
+  return redeemTokens(context, baseUrl, tempToken, staticData);
+}
 
-    if (statusResponse.status.code === 200) {
-      break;
-    }
+// --- Certificate / XAdES auth flow ---
 
-    if (statusResponse.status.code === 100) {
-      await sleep(POLL_INTERVAL_MS);
-      continue;
-    }
+async function authenticateWithCertificate(
+  context: IExecuteFunctions,
+  baseUrl: string,
+  nip: string,
+  privateKeyPem: string,
+  certificatePem: string,
+  passphrase: string | undefined,
+  staticData: Record<string, unknown>,
+): Promise<string> {
+  // Step 1: Get challenge
+  const challenge = (await context.helpers.httpRequest({
+    method: 'POST',
+    url: `${baseUrl}/auth/challenge`,
+    json: true,
+  })) as ChallengeResponse;
 
-    // Error status
-    throw new NodeApiError(context.getNode(), {} as never, {
-      message: `KSeF authentication failed (code ${statusResponse.status.code})`,
-      description: translateAuthStatus(statusResponse.status),
-    });
+  // Step 2: Build + sign XAdES XML (local)
+  const signedXml = signAuthRequest(
+    challenge.challenge,
+    nip,
+    privateKeyPem,
+    certificatePem,
+    passphrase || undefined,
+  );
+
+  // Step 3: Submit signed XML
+  const initResponse = (await context.helpers.httpRequest({
+    method: 'POST',
+    url: `${baseUrl}/auth/xades-signature`,
+    body: signedXml,
+    headers: { 'Content-Type': 'application/xml' },
+    json: true,
+  })) as AuthInitResponse;
+
+  const tempToken = initResponse.authenticationToken.token;
+
+  // Steps 4-5: Poll + Redeem (shared)
+  await pollAuthStatus(context, baseUrl, initResponse.referenceNumber, tempToken);
+  return redeemTokens(context, baseUrl, tempToken, staticData);
+}
+
+// --- Main entry point ---
+
+export async function getAccessToken(
+  context: IExecuteFunctions,
+  baseUrl: string,
+  credentials: IDataObject,
+): Promise<string> {
+  const staticData = context.getWorkflowStaticData('global') as Record<
+    string,
+    unknown
+  >;
+  const cached = getSession(staticData, baseUrl);
+
+  // Return cached token if still valid (with buffer)
+  if (
+    cached &&
+    new Date(cached.accessTokenExpiry).getTime() >
+      Date.now() + TOKEN_EXPIRY_BUFFER_MS
+  ) {
+    return cached.accessToken;
   }
 
-  // Step 6: Redeem access token
-  const tokensResponse = (await context.helpers.httpRequest({
-    method: 'POST',
-    url: `${baseUrl}/auth/token/redeem`,
-    headers: { Authorization: `Bearer ${tempToken}` },
-    json: true,
-  })) as AuthTokensResponse;
+  // Try refresh if access expired but refresh is still valid
+  if (
+    cached &&
+    new Date(cached.refreshTokenExpiry).getTime() >
+      Date.now() + TOKEN_EXPIRY_BUFFER_MS
+  ) {
+    try {
+      return await refreshAccessToken(context, baseUrl, cached, staticData);
+    } catch {
+      delete staticData.ksefSession;
+    }
+  }
 
-  // Cache session
-  const session: KsefSession = {
-    accessToken: tokensResponse.accessToken.token,
-    accessTokenExpiry: tokensResponse.accessToken.validUntil,
-    refreshToken: tokensResponse.refreshToken.token,
-    refreshTokenExpiry: tokensResponse.refreshToken.validUntil,
+  // Full auth flow — dispatch by auth type
+  // n8n credential storage may convert pipe characters to newlines in
+  // multiline-capable fields. Normalize NIP and token to be safe.
+  const nip = (credentials.nip as string).trim();
+  const authType = (credentials.authType as string) || 'token';
+
+  if (authType === 'certificate') {
+    return authenticateWithCertificate(
+      context,
+      baseUrl,
+      nip,
+      credentials.privateKey as string,
+      credentials.certificate as string,
+      credentials.passphrase as string | undefined,
+      staticData,
+    );
+  }
+
+  // n8n's password field converts "|" to newlines — restore them
+  const rawToken = (credentials.token as string) || '';
+  const normalizedToken = rawToken.replace(/[\r\n]+/g, '|').trim();
+
+  return authenticateWithToken(
+    context,
     baseUrl,
-  };
-  staticData.ksefSession = session;
-
-  return session.accessToken;
+    nip,
+    normalizedToken,
+    staticData,
+  );
 }
 
 export async function closeSession(
@@ -199,7 +295,7 @@ export async function closeSession(
       json: true,
     });
   } catch {
-    // Best effort — don't fail the workflow on cleanup errors
+    // Best effort
   } finally {
     delete staticData.ksefSession;
   }
