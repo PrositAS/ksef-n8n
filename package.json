@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-ksef",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "n8n community node for Poland's KSeF (Krajowy System e-Faktur) e-invoicing API — query, download, and manage invoices with token or certificate authentication",
   "keywords": [
     "n8n-community-node-package",
